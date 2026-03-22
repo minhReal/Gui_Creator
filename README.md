@@ -1,2 +1,2 @@
 # Gui_Creator
-This website makes creating GUIs/UI easier for you!
+As described, this is a fully functional website with support for mobile and PC
