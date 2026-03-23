@@ -804,7 +804,7 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg0);color:var
       <svg width="14" height="14" viewBox="0 0 14 14"><circle cx="7" cy="5.5" r="3" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M2.5 12c0-2.2 2-4 4.5-4s4.5 1.8 4.5 4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="5.5" cy="5" r=".5" fill="currentColor"/><circle cx="8.5" cy="5" r=".5" fill="currentColor"/><path d="M5.8 7 Q7 7.8 8.2 7" fill="none" stroke="currentColor" stroke-width=".9" stroke-linecap="round"/></svg>
       Roblox GUI A.I
     </h3>
-    <span style="font-size:9px;color:var(--txt3);">Claude Sonnet</span>
+    <span style="font-size:9px;color:var(--txt3);">Llama 3.3 · Groq</span>
     <button id="ai-close" onclick="toggleAI()">✕</button>
   </div>
   <div id="ai-msgs">
@@ -1062,203 +1062,124 @@ function doImport(){
         renderTree();renderCanvas();renderProps();updateTbar();updateStatus();
         closeModal('import-modal');toast('Imported JSON layout!');
       } else if(parsed.id&&parsed.cls){
-        // Single node import
         saveUndo();const cl=cloneO(parsed);reId(cl);cl.pId='root';ROOT.children.push(cl);
         selIds=[cl.id];renderTree();renderCanvas();renderProps();updateTbar();updateStatus();
         closeModal('import-modal');toast('Imported node: '+cl.name);
       } else toast('Invalid JSON format');
     }catch(e){toast('JSON parse error: '+e.message);}
   } else {
-    // Lua parse: basic extraction of Instance.new() calls
-    const code=document.getElementById('import-lua-ta').value;
+    const code=document.getElementById('import-lua-ta').value.trim();
+    if(!code){toast('Nothing to import');return;}
+    // Detect if code is a logic/behavior script (not just GUI definitions)
+    const isLogicScript=code.includes('game:GetService')||code.includes('RunService')||
+      code.includes('UserInputService')||code.includes('WaitForChild')||
+      code.includes('Humanoid')||code.includes(':Connect(')||
+      code.includes('Players.LocalPlayer');
+    // Parse GUI objects
     const nodes=parseLuaToNodes(code);
-    if(!nodes.length){toast('No GUI objects found in script');return;}
-    saveUndo();nodes.forEach(n=>{n.pId='root';ROOT.children.push(n);});
-    selIds=[];renderTree();renderCanvas();renderProps();updateTbar();updateStatus();
-    closeModal('import-modal');toast(`Imported ${nodes.length} object(s) from Lua`);
+    if(nodes.length===0||isLogicScript){
+      // Import the whole thing as a script node
+      const hasLocalPlayer=code.includes('LocalPlayer')||code.includes('PlayerGui');
+      let cls=hasLocalPlayer?'LocalScript':'Script';
+      if(code.includes('local Module')&&code.includes('return Module'))cls='ModuleScript';
+      saveUndo();
+      const id='el_'+(idN++);
+      const scriptName=code.match(/--\s*(\w+Script)\b/)?.[1]||cls+idN;
+      const node={id,cls,name:scriptName,pId:'root',children:[],
+        props:{...DEF[cls],source:code},
+        x:0,y:0,xSc:0,ySc:0,w:200,h:100,wSc:0,hSc:0,rot:0,locked:false,flipH:false,flipV:false};
+      ROOT.children.push(node);selIds=[id];
+      renderTree();renderCanvas();renderProps();updateTbar();updateStatus();
+      closeModal('import-modal');toast('Imported as '+cls+'!');
+    } else {
+      saveUndo();nodes.forEach(n=>{ROOT.children.push(n);});
+      selIds=nodes.map(n=>n.id);
+      renderTree();renderCanvas();renderProps();updateTbar();updateStatus();
+      closeModal('import-modal');toast(`Imported ${nodes.length} GUI object(s)!`);
+    }
   }
 }
+
 function parseLuaToNodes(code){
   const nodes=[];const sz=getSizes();const lines=code.split('\n');
-  const instRegex=/Instance\.new\("([^"]+)"\)/;const posRegex=/\.Position\s*=\s*UDim2\.new\(([^)]+)\)/;const sizeRegex=/\.Size\s*=\s*UDim2\.new\(([^)]+)\)/;
-  const nameRegex=/\.Name\s*=\s*"([^"]+)"/;const bgRegex=/\.BackgroundColor3\s*=\s*Color3\.fromRGB\((\d+),\s*(\d+),\s*(\d+)\)/;
-  const textRegex=/\.Text\s*=\s*"([^"]*)"/;const textSzRegex=/\.TextSize\s*=\s*(\d+)/;
-  let cur=null;const varMap={};
+  const varMap={};let cur=null;
+  const GUI_CLASSES=new Set(Object.keys(DEF).filter(k=>!DEF[k]._mod&&!DEF[k]._script));
+
   lines.forEach(line=>{
-    const im=line.match(/local\s+(\w+)\s*=\s*Instance\.new\("([^"]+)"\)/);
-    if(im){const[,varName,cls]=im;if(DEF[cls]&&!DEF[cls]._mod){cur={id:'el_'+(idN++),cls,name:varName,pId:'root',children:[],props:{...DEF[cls]},x:Math.round(sz.w/2-100),y:Math.round(sz.h/2-50),xSc:0,ySc:0,w:200,h:100,wSc:0,hSc:0,rot:0,locked:false,flipH:false,flipV:false};varMap[varName]=cur;nodes.push(cur);}return;}
+    // Match: local VarName = Instance.new("ClassName")
+    const im=line.match(/^\s*local\s+(\w+)\s*=\s*Instance\.new\(\s*"([^"]+)"\s*\)/);
+    if(im){
+      const[,varName,cls]=im;
+      if(GUI_CLASSES.has(cls)){
+        cur={id:'el_'+(idN++),cls,name:varName,pId:'root',children:[],
+          props:{...DEF[cls]},x:Math.round(sz.w/2-100),y:Math.round(sz.h/2-50),
+          xSc:0,ySc:0,w:200,h:100,wSc:0,hSc:0,rot:0,locked:false,flipH:false,flipV:false};
+        varMap[varName]=cur;nodes.push(cur);
+      }
+      return;
+    }
+
+    // Match: VarName.Property = value (switch cur based on varName)
+    const propLine=line.match(/^\s*(\w+)\.(\w+)\s*=/);
+    if(propLine){
+      const[,varName]=propLine;
+      if(varMap[varName])cur=varMap[varName];
+    }
+
     if(!cur)return;
-    const pm=line.match(/\.Position\s*=\s*UDim2\.new\(([^)]+)\)/);if(pm){const[xSc,x,ySc,y]=pm[1].split(',').map(v=>parseFloat(v.trim())||0);cur.xSc=xSc;cur.x=x;cur.ySc=ySc;cur.y=y;}
-    const sm=line.match(/\.Size\s*=\s*UDim2\.new\(([^)]+)\)/);if(sm){const[wSc,w,hSc,h]=sm[1].split(',').map(v=>parseFloat(v.trim())||0);cur.wSc=wSc;cur.w=w;cur.hSc=hSc;cur.h=h;}
+
+    // Position
+    const pm=line.match(/\.Position\s*=\s*UDim2\.new\(([^)]+)\)/);
+    if(pm){const[xSc,x,ySc,y]=pm[1].split(',').map(v=>parseFloat(v)||0);cur.xSc=xSc;cur.x=x;cur.ySc=ySc;cur.y=y;}
+    // Size
+    const sm=line.match(/\.Size\s*=\s*UDim2\.new\(([^)]+)\)/);
+    if(sm){const[wSc,w,hSc,h]=sm[1].split(',').map(v=>parseFloat(v)||0);cur.wSc=wSc;cur.w=Math.max(1,w||wSc*sz.w||100);cur.hSc=hSc;cur.h=Math.max(1,h||hSc*sz.h||50);}
+    // Name
     const nm=line.match(/\.Name\s*=\s*"([^"]+)"/);if(nm)cur.name=nm[1];
-    const bgm=line.match(/\.BackgroundColor3\s*=\s*Color3\.fromRGB\((\d+),\s*(\d+),\s*(\d+)\)/);if(bgm)cur.props.bg='#'+[bgm[1],bgm[2],bgm[3]].map(v=>parseInt(v).toString(16).padStart(2,'0')).join('');
+    // BackgroundColor3
+    const bgm=line.match(/\.BackgroundColor3\s*=\s*Color3\.fromRGB\((\d+),\s*(\d+),\s*(\d+)\)/);
+    if(bgm)cur.props.bg='#'+[bgm[1],bgm[2],bgm[3]].map(v=>parseInt(v).toString(16).padStart(2,'0')).join('');
+    // BackgroundTransparency
+    const bgtm=line.match(/\.BackgroundTransparency\s*=\s*([\d.]+)/);
+    if(bgtm)cur.props.bgOp=1-parseFloat(bgtm[1]);
+    // Text
     const tm=line.match(/\.Text\s*=\s*"([^"]*)"/);if(tm&&cur.props.text!==undefined)cur.props.text=tm[1];
+    // TextColor3
+    const tcm=line.match(/\.TextColor3\s*=\s*Color3\.fromRGB\((\d+),\s*(\d+),\s*(\d+)\)/);
+    if(tcm&&cur.props.textC!==undefined)cur.props.textC='#'+[tcm[1],tcm[2],tcm[3]].map(v=>parseInt(v).toString(16).padStart(2,'0')).join('');
+    // TextSize
     const tsm=line.match(/\.TextSize\s*=\s*(\d+)/);if(tsm&&cur.props.textS!==undefined)cur.props.textS=parseInt(tsm[1]);
+    // Font
+    const fm=line.match(/\.Font\s*=\s*Enum\.Font\.(\w+)/);if(fm&&cur.props.font!==undefined)cur.props.font=fm[1];
+    // TextScaled
+    const tscm=line.match(/\.TextScaled\s*=\s*(true|false)/);if(tscm&&cur.props.textScaled!==undefined)cur.props.textScaled=tscm[1]==='true';
+    // Rotation
     const rm=line.match(/\.Rotation\s*=\s*([\d.]+)/);if(rm)cur.rot=parseFloat(rm[1]);
+    // Visible
     const vim=line.match(/\.Visible\s*=\s*(true|false)/);if(vim)cur.props.visible=vim[1]==='true';
+    // ZIndex
     const zim=line.match(/\.ZIndex\s*=\s*(\d+)/);if(zim&&cur.props.zIdx!==undefined)cur.props.zIdx=parseInt(zim[1]);
-    const btm=line.match(/\.BackgroundTransparency\s*=\s*([\d.]+)/);if(btm&&cur.props.bgOp!==undefined)cur.props.bgOp=1-parseFloat(btm[1]);
+    // BorderSizePixel
+    const bsm=line.match(/\.BorderSizePixel\s*=\s*(\d+)/);if(bsm&&cur.props.borderS!==undefined)cur.props.borderS=parseInt(bsm[1]);
+    // Parent relationship — nest node inside parent if parent is a GUI object
+    const parm=line.match(/\.Parent\s*=\s*(\w+)/);
+    if(parm){
+      const parentVar=parm[1];
+      const parentNode=varMap[parentVar];
+      if(parentNode&&parentNode!==cur){
+        // Remove cur from nodes (top-level) and add as child of parentNode
+        const idx=nodes.indexOf(cur);if(idx>=0)nodes.splice(idx,1);
+        cur.pId=parentNode.id;
+        parentNode.children.push(cur);
+      }
+    }
   });
   return nodes;
 }
 
 // ══ A.I PANEL ══
-let aiHistory=[];let aiThinking=false;
-let _aiImportCode='';
+// AI functions loaded from ai.js
 
-async function aiSend(){
-  if(aiThinking)return;
-  const inp=document.getElementById('ai-inp');const text=inp.value.trim();if(!text)return;
-  inp.value='';aiThinking=true;document.getElementById('ai-send').disabled=true;
-  aiAddMsg('user',text);
-  const allN=allNodes().filter(n=>!n.props._mod&&!n.props._script);
-  const sceneCtx=allN.length?`Current GUI has ${allN.length} objects: ${allN.slice(0,8).map(n=>n.cls+' "'+n.name+'"').join(', ')}${allN.length>8?'...':''}.`:'Canvas is empty.';
-  const sz=getSizes();const devCtx=`Device: ${device} (${sz.w}x${sz.h}).`;
-  const thinkDiv=aiAddMsg('thinking',helpLang==='vi'?'Đang suy nghĩ...':'Thinking...');
-  aiHistory.push({role:'user',content:text});
-  try{
-    const res=await fetch('https://api.anthropic.com/v1/messages',{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({
-        model:'claude-sonnet-4-6',max_tokens:1200,
-        system:`You are an expert Roblox GUI designer and Lua scripter embedded in a web-based Roblox GUI Creator tool. Help users design beautiful GUIs and write Lua scripts. You know all Roblox GuiObject properties and Lua scripting.\n\nIMPORTANT: Always respond in the SAME LANGUAGE the user writes in (Vietnamese if they write Vietnamese, English if they write English). Use markdown formatting: **bold** for important terms, ## for section headers, \`inline code\` for property names, \`\`\`lua code blocks\`\`\` for scripts. Be concise and practical.\n\nContext: ${devCtx} ${sceneCtx}\n\nWhen generating scripts, always wrap them in \`\`\`lua...\`\`\` code blocks so the user can import them. Keep responses under 400 words.`,
-        messages:aiHistory.slice(-12)
-      })
-    });
-    const data=await res.json();thinkDiv.remove();
-    if(!res.ok){const msg=data.error?.message||'API error '+res.status;aiHistory.pop();aiAddMsg('bot','❌ '+msg);aiThinking=false;document.getElementById('ai-send').disabled=false;return;}
-    const reply=data.content?.find(c=>c.type==='text')?.text||(helpLang==='vi'?'Xin lỗi, có lỗi xảy ra.':'Sorry, an error occurred.');
-    aiHistory.push({role:'assistant',content:reply});
-    aiAddMsg('bot',reply);
-  }catch(err){
-    thinkDiv.remove();aiHistory.pop();
-    const isCors=err.message.includes('fetch')||err.message.includes('Failed')||err.message.includes('CORS');
-    aiAddMsg('bot', isCors
-      ? (helpLang==='vi'
-        ? '❌ **Lỗi kết nối.**\n\nTính năng A.I chỉ hoạt động khi mở file này **trong Claude.ai** (không phải mở file .html cục bộ).\n\nHãy mở lại file này từ trong chat Claude.ai để dùng A.I.'
-        : '❌ **Connection error.**\n\nThe AI feature only works when this file is opened **inside Claude.ai** (not as a local .html file).\n\nPlease open this file from within Claude.ai to use AI.')
-      : '❌ '+err.message
-    );
-  }
-  aiThinking=false;document.getElementById('ai-send').disabled=false;
-}
-
-function toggleAI(){const p=document.getElementById('ai-panel');p.classList.toggle('open');}
-function aiKey(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();aiSend();}}
-function aiSuggest(msg){document.getElementById('ai-inp').value=msg;document.getElementById('ai-panel').classList.add('open');aiSend();}
-
-// ── Markdown → HTML ──
-function renderMD(text){
-  // escape HTML first for safety
-  const esc2=s=>s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  // extract code blocks before escaping
-  const codeBlocks=[];
-  text=text.replace(/```(\w*)\n?([\s\S]*?)```/g,(match,lang,code)=>{
-    const idx=codeBlocks.length;codeBlocks.push({lang:lang.toLowerCase(),code:code.trimEnd()});
-    return `\x00CODE${idx}\x00`;
-  });
-  // escape remaining
-  text=esc2(text);
-  // headers
-  text=text.replace(/^### (.+)$/gm,'<h3>$1</h3>');
-  text=text.replace(/^## (.+)$/gm,'<h2>$1</h2>');
-  text=text.replace(/^# (.+)$/gm,'<h1>$1</h1>');
-  // bold/italic
-  text=text.replace(/\*\*\*(.+?)\*\*\*/g,'<strong><em>$1</em></strong>');
-  text=text.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');
-  text=text.replace(/\*(.+?)\*/g,'<em>$1</em>');
-  text=text.replace(/__(.+?)__/g,'<strong>$1</strong>');
-  text=text.replace(/_(.+?)_/g,'<em>$1</em>');
-  // inline code
-  text=text.replace(/`([^`]+)`/g,'<code>$1</code>');
-  // hr
-  text=text.replace(/^---+$/gm,'<hr>');
-  // lists
-  text=text.replace(/^(\s*[-*+] .+)(\n\s*[-*+] .+)*/gm,m=>{
-    const items=m.split('\n').filter(Boolean).map(l=>`<li>${l.replace(/^\s*[-*+] /,'')}</li>`).join('');
-    return`<ul>${items}</ul>`;
-  });
-  text=text.replace(/^(\s*\d+\. .+)(\n\s*\d+\. .+)*/gm,m=>{
-    const items=m.split('\n').filter(Boolean).map(l=>`<li>${l.replace(/^\s*\d+\. /,'')}</li>`).join('');
-    return`<ol>${items}</ol>`;
-  });
-  // paragraphs: wrap bare lines
-  text=text.split('\n').map(line=>{
-    if(!line.trim())return'';
-    if(/^<(h[123]|ul|ol|li|hr|pre|div)/.test(line.trim()))return line;
-    return`<p>${line}</p>`;
-  }).join('\n');
-  // restore code blocks
-  text=text.replace(/\x00CODE(\d+)\x00/g,(_,i)=>{
-    const {lang,code}=codeBlocks[i];
-    return`\x01CODEBLOCK:${i}\x01`;
-  });
-  return{html:text,codeBlocks};
-}
-
-function aiAddMsg(role,text){
-  const msgs=document.getElementById('ai-msgs');
-  const div=document.createElement('div');
-  div.className='ai-msg '+(role==='user'?'user':role==='thinking'?'thinking':'bot');
-  if(role==='user'||role==='thinking'){div.textContent=text;}
-  else{
-    // render markdown
-    const {html,codeBlocks}=renderMD(text);
-    // split on code block placeholders
-    const parts=html.split(/\x01CODEBLOCK:(\d+)\x01/);
-    parts.forEach((part,pi)=>{
-      if(pi%2===0){
-        const span=document.createElement('div');span.innerHTML=part;div.appendChild(span);
-      } else {
-        const idx=parseInt(part);const {lang,code}=codeBlocks[idx];
-        // detect if it's a script
-        const isLua=lang==='lua'||lang==='luau'||lang==='';
-        const isScript=isLua&&(code.includes('Instance.new')||code.includes('game.')||code.includes('script.')||code.includes('local ')||code.includes('function '));
-        // code block wrapper
-        const pre=document.createElement('pre');pre.textContent=code;div.appendChild(pre);
-        // action buttons
-        const actions=document.createElement('div');actions.className='ai-code-actions';
-        // copy button
-        const copyBtn=document.createElement('button');copyBtn.className='ai-code-btn';
-        copyBtn.innerHTML=`<svg width="12" height="12" viewBox="0 0 12 12"><rect x="1" y="3" width="7" height="8" rx="1" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="4" y="1" width="7" height="8" rx="1" fill="var(--bg2)" stroke="currentColor" stroke-width="1.2"/></svg>Copy`;
-        copyBtn.onclick=()=>{navigator.clipboard.writeText(code).then(()=>{copyBtn.textContent='✓ Copied!';setTimeout(()=>{copyBtn.innerHTML=`<svg width="12" height="12" viewBox="0 0 12 12"><rect x="1" y="3" width="7" height="8" rx="1" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="4" y="1" width="7" height="8" rx="1" fill="var(--bg2)" stroke="currentColor" stroke-width="1.2"/></svg>Copy`;},1500);});};
-        actions.appendChild(copyBtn);
-        // import button for lua scripts
-        if(isScript){
-          const impBtn=document.createElement('button');impBtn.className='ai-code-btn import';
-          impBtn.innerHTML=`<svg width="12" height="12" viewBox="0 0 12 12"><path d="M2 1h6l3 3v7H2Z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><polyline points="3.5,7.5 6,10 8.5,7.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/><line x1="6" y1="4" x2="6" y2="10" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>Import vào Explorer`;
-          impBtn.onclick=()=>showAIImportConfirm(code);
-          actions.appendChild(impBtn);
-        }
-        div.appendChild(actions);
-      }
-    });
-  }
-  msgs.appendChild(div);msgs.scrollTop=msgs.scrollHeight;return div;
-}
-
-function showAIImportConfirm(code){
-  _aiImportCode=code;
-  document.getElementById('ai-import-preview').textContent=code.length>300?code.slice(0,300)+'...\n(còn nữa)':code;
-  document.getElementById('ai-import-confirm').classList.add('open');
-}
-function closeAIImport(){document.getElementById('ai-import-confirm').classList.remove('open');}
-function confirmAIImport(){
-  closeAIImport();
-  if(!_aiImportCode)return;
-  // Detect type from code content
-  let cls='LocalScript';
-  if(_aiImportCode.includes('game:GetService("Players")')&&!_aiImportCode.includes('LocalPlayer'))cls='Script';
-  if(_aiImportCode.includes('local Module')&&_aiImportCode.includes('return Module'))cls='ModuleScript';
-  saveUndo();
-  const id='el_'+(idN++);
-  const node={id,cls,name:cls+idN,pId:'root',children:[],props:{...DEF[cls],source:_aiImportCode},x:0,y:0,xSc:0,ySc:0,w:200,h:100,wSc:0,hSc:0,rot:0,locked:false,flipH:false,flipV:false};
-  ROOT.children.push(node);selIds=[id];
-  renderTree();renderCanvas();renderProps();updateTbar();updateStatus();
-  toast('✓ Imported '+cls+' vào Explorer!');
-  _aiImportCode='';
-}
 
 // ══ SETTINGS ══
 const SETTINGS_KEY='rbx_settings';
@@ -1446,8 +1367,14 @@ function init(){
   buildInsertList();buildClrPresets();setDevice('desktop');
   renderTree();renderProps();updateTbar();updateStatus();
   setupEvents();setupSplitters();
-  // apply saved settings after first render
-  setTimeout(()=>{applySettings();applyLang();},100);
+  // apply saved settings + language
+  setTimeout(()=>{
+    applySettings();applyLang();
+    // load saved API key
+    const k=loadAIKey();
+    const ki=document.getElementById('ai-key-inp');
+    if(ki)ki.value=localStorage.getItem('rbx_groq_key')||'';// show saved if exists, not default
+  },100);
   document.addEventListener('keydown',handleKey);
   document.addEventListener('click',e=>{
     if(!e.target.closest('#ctx'))hideCtx();
@@ -2096,5 +2023,6 @@ function renderHelp(){
 
 init();
 </script>
+<script src="ai.js"></script>
 </body>
 </html>
